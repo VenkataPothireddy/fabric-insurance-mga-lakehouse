@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 
@@ -68,6 +69,9 @@ app = FastAPI(
 def _paginate(df: pd.DataFrame, limit: int, offset: int) -> dict:
     total = len(df)
     page = df.iloc[offset : offset + limit]
+    # Convert NaN, inf, -inf to None so the JSON encoder doesn't choke.
+    # JSON has no concept of NaN or infinity; None serializes as null.
+    page = page.replace([np.inf, -np.inf, np.nan], None)
     return {
         "data": page.to_dict(orient="records"),
         "pagination": {
