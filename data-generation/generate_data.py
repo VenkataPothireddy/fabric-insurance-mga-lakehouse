@@ -67,22 +67,22 @@ def generate_programs() -> pd.DataFrame:
       This drives claims.csv generation downstream.
     """
     programs = [
-        # (program_code, program_name, base_premium_min, base_premium_max, loss_ratio_target)
-        ("DIET", "Dietary Supplements",       2000,   50000, 0.35),
-        ("ENV",  "Environmental",            10000,  250000, 0.50),
-        ("HCP",  "Healthcare Providers",     25000,  300000, 0.65),
-        ("ENRG", "Energy",                   30000,  400000, 0.55),
-        ("LIFE", "Life Sciences",            15000,  200000, 0.45),
-        ("CONT", "Contingency",               5000,  150000, 0.20),
-        ("MFG",  "Manufacturers",            10000,  175000, 0.55),
-        ("PROP", "Property",                  5000,  100000, 0.50),
-        ("UMB",  "Umbrella",                  3000,   80000, 0.40),
-        ("BIZ",  "Business Professionals",    2000,   40000, 0.30),
-    ]
+    # (program_code, program_name, base_premium_min, base_premium_max, loss_ratio_target, commission_modifier)
+    ("DIET", "Dietary Supplements",       2000,   50000, 0.35, 1.05),
+    ("ENV",  "Environmental",            10000,  250000, 0.50, 1.05),
+    ("HCP",  "Healthcare Providers",     25000,  300000, 0.65, 1.15),
+    ("ENRG", "Energy",                   30000,  400000, 0.55, 1.10),
+    ("LIFE", "Life Sciences",            15000,  200000, 0.45, 1.10),
+    ("CONT", "Contingency",               5000,  150000, 0.20, 1.20),
+    ("MFG",  "Manufacturers",            10000,  175000, 0.55, 1.00),
+    ("PROP", "Property",                  5000,  100000, 0.50, 0.95),
+    ("UMB",  "Umbrella",                  3000,   80000, 0.40, 1.00),
+    ("BIZ",  "Business Professionals",    2000,   40000, 0.30, 0.90),
+]
     return pd.DataFrame(
         programs,
         columns=["program_code", "program_name",
-                 "base_premium_min", "base_premium_max", "loss_ratio_target"],
+                 "base_premium_min", "base_premium_max", "loss_ratio_target", "commission_modifier"],
     )
 
 
