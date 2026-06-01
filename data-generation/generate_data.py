@@ -367,84 +367,126 @@ def generate_commission_payouts(policies: pd.DataFrame,
                                 agents: pd.DataFrame,
                                 programs: pd.DataFrame) -> pd.DataFrame:
     """
-    >>> THIS IS THE INTERVIEW DIFFERENTIATOR <<<
+        >>> INTERVIEW DIFFERENTIATOR <
 
-    This CSV represents the OUTPUT of the legacy VBA tool. The silver-layer
-    notebook will replicate this calculation in PySpark from scratch — proving
-    the VBA workbook can be retired without losing business logic.
+    Generates 5,000 commission payouts representing what the LEGACY VBA TOOL
+    produced over the last 24 months. Silver layer will replicate the
+    calculation from documented rules and surface ~3% of rows where VBA
+    diverges from source-of-truth.
 
-    Document the formula below in plain English. It becomes the first entry
-    in docs/business-logic/commission-calculation.md.
+    Five documented business rules:
+        1. Tier rate        — agent.commission_rate (BRONZE 0.08 ... PLATINUM 0.15)
+        2. Program modifier — per-program multiplier (HCP 1.15, CONT 1.20, etc.)
+        3. Volume bonus     — +0.01 to rate if agent's trailing-12mo premium > $500K
+        4. Status override  — CANCELLED × 0.0 (clawback); ACTIVE/EXPIRED × 1.0
+        5. Ceiling          — cap commission_amount at $50,000
 
-    TODO (Venkata):
-    - Pick 5,000 ACTIVE policies (newest commission cycle).
-    - For each:
-        commission_amount = premium
-                          × agent.commission_rate   (tier-based)
-                          × program_modifier        (see below)
-                          - adjustments              (random clawbacks)
+    Formula:
+        effective_rate     = tier_rate + (volume_bonus if qualifying else 0)
+        gross              = premium × effective_rate × program_modifier × status_multiplier
+        gross_capped       = min(gross, 50_000)
+        commission_amount  = gross_capped − adjustments
 
-      program_modifier (multiplier on top of base rate):
-        Healthcare Providers: 1.15  (harder to place, premium product)
-        Energy:               1.10
-        Environmental:        1.05
-        Life Sciences:        1.10
-        Contingency:          1.20  (specialty, low volume, high margin)
-        Manufacturers:        1.00
-        Property:             0.95  (commodity-ish)
-        Umbrella:             1.00
-        Business Professionals: 0.90
-        Dietary Supplements:  1.05
+    Drift patterns (~3% total, simulating undocumented VBA bugs):
+        A (~1%): commission_rate stored at next-lower tier → underpayment
+        B (~1%): program_modifier stored as 1.0          → underpayment
+        C (~1%): volume_bonus applied when not qualifying → overpayment
 
-      adjustments:
-        10% of rows → random deduction $50–$500 (chargebacks, fee corrections)
-        Otherwise 0.
-
-    - payout_date = effective_date + random 30–90 days (typical settlement lag)
-    - payout_status: 80% PAID, 15% PENDING, 5% DISPUTED
-
-    Add `calc_method = "LEGACY_VBA_V3"` as a column. This makes it explicit
-    in the demo: silver notebook will produce the same column with value
-    "FABRIC_PYSPARK_V1" — side-by-side reconciliation proves equivalence.
+    The CSV records what VBA used (with drift baked in). Silver recomputes
+    from source-of-truth tables and surfaces the gap in
+    silver_commission_reconciliation.
     """
-    rows = []
 
-    # Program modifier: program-specific multiplier on top of base commission rate
+    # ---- Phase 1: Rule constants ----
     program_modifiers = {
-        "DIET": 1.05,
-        "ENV":  1.05,
-        "HCP":  1.15,
-        "ENRG": 1.10,
-        "LIFE": 1.10,
-        "CONT": 1.20,
-        "MFG":  1.00,
-        "PROP": 0.95,
-        "UMB":  1.00,
-        "BIZ":  0.90,
+        "DIET": 1.05, "ENV":  1.05, "HCP":  1.15, "ENRG": 1.10,
+        "LIFE": 1.10, "CONT": 1.20, "MFG":  1.00, "PROP": 0.95,
+        "UMB":  1.00, "BIZ":  0.90,
     }
 
-    # Lookup tables built once before the loop
-    agent_rate_lookup = dict(zip(
-        agents["agent_id"],
-        agents["commission_rate"]
-    ))
+    VOLUME_BONUS_THRESHOLD = 850_000
+    VOLUME_BONUS_AMOUNT    = 0.01
+    COMMISSION_CEILING     = 50_000
 
-    # Filter to commissionable policies (ACTIVE preferred, also allow EXPIRED)
-    eligible = policies[policies["status"].isin(["ACTIVE", "EXPIRED"])]
+    status_multipliers = {
+        "ACTIVE":    1.0,
+        "EXPIRED":   1.0,
+        "CANCELLED": 0.0,
+    }
 
-    # Oversample by 20% to absorb dirty-row skips
-    selected = eligible.sample(
-        n=int(N_PAYOUTS * 1.2),
-        replace=False,
-        random_state=SEED
+    # Pattern A: tier rate downgrade map (BRONZE has no lower tier — skipped)
+    tier_downgrade = {0.10: 0.08, 0.12: 0.10, 0.15: 0.12}
+
+
+    # ---- Phase 2: Pre-compute volume bonus qualifiers (Rule 3) ----
+    # An agent qualifies if their trailing 12-month written premium > $500K.
+    # We compute this once, against a clean subset of policies, and reuse
+    # the resulting set inside the row loop.
+    trailing_12m_start = DATE_END - timedelta(days=365)
+
+    valid_policies = policies[
+        policies["premium"].notna()
+        & policies["effective_date"].apply(
+            lambda x: isinstance(x, (datetime, pd.Timestamp))
+        )
+    ].copy()
+    valid_policies = valid_policies[valid_policies["premium"] > 0]
+    valid_policies["effective_date_ts"] = pd.to_datetime(valid_policies["effective_date"])
+
+    trailing = valid_policies[valid_policies["effective_date_ts"] >= trailing_12m_start]
+
+    agent_trailing_premium = trailing.groupby("agent_id")["premium"].sum()
+    qualifying_agents = set(
+        agent_trailing_premium[agent_trailing_premium > VOLUME_BONUS_THRESHOLD].index
     )
 
+
+
+
+
+    # ---- Phase 3a: Lookups and eligible policy selection ----
+    agent_rate_lookup = dict(zip(agents["agent_id"], agents["commission_rate"]))
+
+    # Include CANCELLED so Rule 4 (status override) has rows to act on.
+    eligible = policies[policies["status"].isin(["ACTIVE", "EXPIRED", "CANCELLED"])]
+    selected = eligible.sample(
+        n=int(N_PAYOUTS * 1.3),       # oversample to absorb dirty-row skips
+        replace=False,
+        random_state=SEED,
+    ).reset_index(drop=True)
+
+    # ---- Phase 3b: Pre-assign drift patterns to PAYOUT COUNTER values ----
+    # Drift is keyed by which successful payout gets drifted (0 to N_PAYOUTS-1),
+    # NOT by position in `selected`. This guarantees exact counts because every
+    # value 0..N_PAYOUTS-1 is reached by the loop, while positions in `selected`
+    # beyond N_PAYOUTS are never reached. 1% per pattern, deterministic.
+    n_pattern_a = int(N_PAYOUTS * 0.01)
+    n_pattern_b = int(N_PAYOUTS * 0.01)
+    n_pattern_c = int(N_PAYOUTS * 0.01)
+
+    drift_rng = np.random.default_rng(SEED + 1)
+    shuffled_payouts = drift_rng.permutation(N_PAYOUTS)
+
+    drift_assignments = {}
+    cursor = 0
+    for p in shuffled_payouts[cursor : cursor + n_pattern_a]:
+        drift_assignments[int(p)] = "A"
+    cursor += n_pattern_a
+    for p in shuffled_payouts[cursor : cursor + n_pattern_b]:
+        drift_assignments[int(p)] = "B"
+    cursor += n_pattern_b
+    for p in shuffled_payouts[cursor : cursor + n_pattern_c]:
+        drift_assignments[int(p)] = "C"
+
+    # ---- Phase 4: Row loop ----
+    rows = []
     payout_counter = 0
-    for _, policy_row in selected.iterrows():
+
+    for row_position, policy_row in selected.iterrows():
         if payout_counter >= N_PAYOUTS:
             break
 
-        # Skip dirty rows
+        # 4a. Skip dirty rows
         if pd.isna(policy_row["premium"]) or policy_row["premium"] <= 0:
             continue
         if pd.isna(policy_row["agent_id"]) or policy_row["agent_id"] not in agent_rate_lookup:
@@ -452,52 +494,77 @@ def generate_commission_payouts(policies: pd.DataFrame,
         if not isinstance(policy_row["effective_date"], (datetime, pd.Timestamp)):
             continue
 
-        premium = policy_row["premium"]
-        commission_rate = agent_rate_lookup[policy_row["agent_id"]]
-        program_modifier = program_modifiers[policy_row["program_code"]]
+        # 4b. Look up true (source-of-truth) inputs
+        premium             = policy_row["premium"]
+        true_tier_rate      = agent_rate_lookup[policy_row["agent_id"]]
+        true_program_mod    = program_modifiers[policy_row["program_code"]]
+        status              = policy_row["status"]
+        status_multiplier   = status_multipliers[status]
+        qualifies_for_bonus = policy_row["agent_id"] in qualifying_agents
 
-        # Adjustments: 10% of rows get a random deduction $50-$500, else 0
+        # 4c. Initialize recorded inputs as true (default: VBA got it right)
+        recorded_tier_rate   = true_tier_rate
+        recorded_program_mod = true_program_mod
+        applied_volume_bonus = VOLUME_BONUS_AMOUNT if qualifies_for_bonus else 0.0
+
+        # 4d. Apply drift if this row was assigned a pattern
+        drift_pattern = drift_assignments.get(payout_counter)
+        if drift_pattern == "A" and true_tier_rate in tier_downgrade:
+            recorded_tier_rate = tier_downgrade[true_tier_rate]
+        elif drift_pattern == "B":
+            recorded_program_mod = 1.0
+        elif drift_pattern == "C" and not qualifies_for_bonus:
+            applied_volume_bonus = VOLUME_BONUS_AMOUNT
+
+        # 4e. Adjustments — manual chargebacks (10% of rows)
         if random.random() < 0.10:
             adjustments = round(random.uniform(50, 500), 2)
         else:
             adjustments = 0.00
 
-        # THE VBA FORMULA — document this in business-logic/commission-calculation.md
-        commission_amount = round(
-            (premium * commission_rate * program_modifier) - adjustments,
-            2
-        )
+        # 4f. Compute commission using recorded (possibly drifted) inputs
+        effective_rate = recorded_tier_rate + applied_volume_bonus
+        gross = premium * effective_rate * recorded_program_mod * status_multiplier
+        gross_capped = min(gross, COMMISSION_CEILING)
+        commission_amount = round(gross_capped - adjustments, 2)
 
-        # Payout date: 30-90 days after policy effective date
+        # 4g. Payout date and status
         eff_date = pd.Timestamp(policy_row["effective_date"]).to_pydatetime()
         payout_date = eff_date + timedelta(days=random.randint(30, 90))
 
-        payout_status = np.random.choice(
-            ["PAID", "PENDING", "DISPUTED"],
-            p=[0.80, 0.15, 0.05]
-        )
+        if status == "CANCELLED":
+            payout_status = np.random.choice(["DISPUTED", "PENDING"], p=[0.7, 0.3])
+        else:
+            payout_status = np.random.choice(
+                ["PAID", "PENDING", "DISPUTED"],
+                p=[0.80, 0.15, 0.05]
+            )
 
-        one_payout = {
-            "payout_id": f"CMP-{payout_counter + 1:07d}",
-            "policy_id": policy_row["policy_id"],
-            "agent_id": policy_row["agent_id"],
-            "program_code": policy_row["program_code"],
-            "premium": round(premium, 2),
-            "commission_rate": commission_rate,
-            "program_modifier": program_modifier,
-            "adjustments": adjustments,
+        rows.append({
+            "payout_id":         f"CMP-{payout_counter + 1:07d}",
+            "policy_id":         policy_row["policy_id"],
+            "agent_id":          policy_row["agent_id"],
+            "program_code":      policy_row["program_code"],
+            "premium":           round(premium, 2),
+            "commission_rate":   recorded_tier_rate,
+            "program_modifier":  recorded_program_mod,
+            "volume_bonus":      applied_volume_bonus,
+            "policy_status":     status,
+            "status_multiplier": status_multiplier,
+            "adjustments":       adjustments,
             "commission_amount": commission_amount,
-            "payout_date": payout_date.date(),
-            "payout_status": payout_status,
-            "calc_method": "LEGACY_VBA_V3",
-        }
-        rows.append(one_payout)
+            "payout_date":       payout_date.date(),
+            "payout_status":     payout_status,
+            "calc_method":       "LEGACY_VBA_V3",
+        })
         payout_counter += 1
 
+    # ---- Phase 5: Return DataFrame ----
     return pd.DataFrame(
         rows,
         columns=["payout_id", "policy_id", "agent_id", "program_code",
                  "premium", "commission_rate", "program_modifier",
+                 "volume_bonus", "policy_status", "status_multiplier",
                  "adjustments", "commission_amount", "payout_date",
                  "payout_status", "calc_method"],
     )
