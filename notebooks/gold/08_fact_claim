@@ -1,0 +1,182 @@
+/*
+================================================================
+File:        08_fact_claims.sql
+Purpose:     Create and populate fact.claims in gold_citadel_mga
+Source:      silver_citadel_mga.dbo.silver_claims (1,977 rows)
+Grain:       One row per claim
+Notes:       First fact with role-playing dimensions — loss_date_key
+             and report_date_key both reference dim.date in different
+             roles, enabling loss-to-report lag analysis (avg 30 days,
+             range 0-60).
+             agent_key, program_key, carrier_key inherited through
+             dim.policy traversal — silver_claims doesn't carry these
+             directly, they come from the parent policy.
+             Two degenerate dimensions: claim_natural_key (this row's
+             identity) and policy_natural_key (parent policy lookup).
+             claim_amount tightened from FLOAT to DECIMAL(12,2).
+             Status distribution: CLOSED 886, OPEN 790, LITIGATION 205,
+             DENIED 96. Zero orphans across all 6 FK relationships.
+             Total claims: $32.5M against $239M premium (13.6% loss
+             ratio in synthetic data; production ratios would differ).
+Author:      Venkata Pothireddy
+================================================================
+*/
+
+
+
+
+CREATE TABLE fact.claims (
+    claim_key               INT             NOT NULL,
+    loss_date_key           INT             NOT NULL,
+    report_date_key         INT             NOT NULL,
+    policy_key              INT             NOT NULL,
+    agent_key               INT             NOT NULL,
+    program_key             INT             NOT NULL,
+    carrier_key             INT             NOT NULL,
+    claim_natural_key       VARCHAR(20)     NOT NULL,
+    policy_natural_key      VARCHAR(20)     NOT NULL,
+    claim_amount            DECIMAL(12, 2)  NOT NULL,
+    claim_status            VARCHAR(15)     NOT NULL,
+    cause_of_loss           VARCHAR(50)     NOT NULL,
+    created_at              DATETIME2(6)    NOT NULL,
+    updated_at              DATETIME2(6)    NOT NULL
+);
+
+
+SELECT 
+    c.name AS column_name,
+    t.name AS data_type,
+    c.max_length,
+    c.precision,
+    c.scale,
+    c.is_nullable
+FROM sys.columns c
+JOIN sys.types t ON c.user_type_id = t.user_type_id
+WHERE c.object_id = OBJECT_ID('fact.claims')
+ORDER BY c.column_id;
+
+
+
+
+
+INSERT INTO fact.claims (
+    claim_key,
+    loss_date_key,
+    report_date_key,
+    policy_key,
+    agent_key,
+    program_key,
+    carrier_key,
+    claim_natural_key,
+    policy_natural_key,
+    claim_amount,
+    claim_status,
+    cause_of_loss,
+    created_at,
+    updated_at
+)
+SELECT
+    ROW_NUMBER() OVER (ORDER BY s.claim_id)                                           AS claim_key,
+    YEAR(CAST(s.loss_date AS DATE)) * 10000 
+        + MONTH(CAST(s.loss_date AS DATE)) * 100 
+        + DAY(CAST(s.loss_date AS DATE))                                              AS loss_date_key,
+    YEAR(CAST(s.report_date AS DATE)) * 10000 
+        + MONTH(CAST(s.report_date AS DATE)) * 100 
+        + DAY(CAST(s.report_date AS DATE))                                            AS report_date_key,
+    pol.policy_key                                                                    AS policy_key,
+    a.agent_key                                                                       AS agent_key,
+    prog.program_key                                                                  AS program_key,
+    c.carrier_key                                                                     AS carrier_key,
+    s.claim_id                                                                        AS claim_natural_key,
+    s.policy_id                                                                       AS policy_natural_key,
+    s.claim_amount                                                                    AS claim_amount,
+    s.claim_status                                                                    AS claim_status,
+    s.cause_of_loss                                                                   AS cause_of_loss,
+    SYSDATETIME()                                                                     AS created_at,
+    SYSDATETIME()                                                                     AS updated_at
+FROM silver_citadel_mga.dbo.silver_claims s
+JOIN dim.policy   pol  ON s.policy_id        = pol.policy_natural_key
+JOIN dim.agent    a    ON pol.agent_id       = a.agent_natural_key
+JOIN dim.program  prog ON pol.program_code   = prog.program_natural_key
+JOIN dim.carrier  c    ON pol.carrier_id     = c.carrier_natural_key
+WHERE s.claim_id      IS NOT NULL
+  AND s.policy_id     IS NOT NULL
+  AND s.loss_date     IS NOT NULL
+  AND s.report_date   IS NOT NULL
+  AND s.claim_amount  IS NOT NULL
+  AND s.claim_status  IS NOT NULL
+  AND s.cause_of_loss IS NOT NULL;
+
+
+
+
+SELECT 
+    COUNT(*) AS total_rows,
+    MIN(claim_key) AS min_key,
+    MAX(claim_key) AS max_key,
+    COUNT(DISTINCT claim_key) AS distinct_keys
+FROM fact.claims;
+
+
+SELECT TOP 5
+    claim_key,
+    loss_date_key,
+    report_date_key,
+    policy_key,
+    agent_key,
+    program_key,
+    carrier_key,
+    claim_natural_key,
+    policy_natural_key,
+    claim_amount,
+    claim_status,
+    cause_of_loss
+FROM fact.claims
+ORDER BY claim_key;
+
+
+
+SELECT 
+    claim_status,
+    COUNT(*) AS claim_count
+FROM fact.claims
+GROUP BY claim_status
+ORDER BY claim_count DESC;
+
+
+
+
+SELECT 
+    COUNT(*) AS claim_count,
+    SUM(claim_amount) AS total_claims,
+    AVG(claim_amount) AS avg_claim,
+    MIN(claim_amount) AS min_claim,
+    MAX(claim_amount) AS max_claim
+FROM fact.claims;
+
+
+
+
+SELECT 
+    AVG(DATEDIFF(DAY, ld.full_date, rd.full_date)) AS avg_lag_days,
+    MIN(DATEDIFF(DAY, ld.full_date, rd.full_date)) AS min_lag_days,
+    MAX(DATEDIFF(DAY, ld.full_date, rd.full_date)) AS max_lag_days
+FROM fact.claims f
+JOIN dim.date ld ON f.loss_date_key   = ld.date_key
+JOIN dim.date rd ON f.report_date_key = rd.date_key;
+
+
+
+SELECT
+    (SELECT COUNT(*) FROM fact.claims f LEFT JOIN dim.date    ld ON f.loss_date_key   = ld.date_key     WHERE ld.date_key     IS NULL) AS orphan_loss_dates,
+    (SELECT COUNT(*) FROM fact.claims f LEFT JOIN dim.date    rd ON f.report_date_key = rd.date_key     WHERE rd.date_key     IS NULL) AS orphan_report_dates,
+    (SELECT COUNT(*) FROM fact.claims f LEFT JOIN dim.policy  p  ON f.policy_key      = p.policy_key    WHERE p.policy_key    IS NULL) AS orphan_policies,
+    (SELECT COUNT(*) FROM fact.claims f LEFT JOIN dim.agent   a  ON f.agent_key       = a.agent_key     WHERE a.agent_key     IS NULL) AS orphan_agents,
+    (SELECT COUNT(*) FROM fact.claims f LEFT JOIN dim.program pr ON f.program_key     = pr.program_key  WHERE pr.program_key  IS NULL) AS orphan_programs,
+    (SELECT COUNT(*) FROM fact.claims f LEFT JOIN dim.carrier c  ON f.carrier_key     = c.carrier_key   WHERE c.carrier_key   IS NULL) AS orphan_carriers;
+
+
+
+
+ALTER TABLE fact.claims 
+ADD CONSTRAINT PK_fact_claims PRIMARY KEY NONCLUSTERED (claim_key) NOT ENFORCED;
