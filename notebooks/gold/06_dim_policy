@@ -1,0 +1,142 @@
+/*
+================================================================
+File:        06_dim_policy.sql
+Purpose:     Create and populate dim.policy in gold_citadel_mga
+Source:      silver_citadel_mga.dbo.silver_policies (9,709 rows)
+Notes:       Largest dim by row count. Status distribution:
+             ACTIVE 7,320 / EXPIRED 1,411 / CANCELLED 774 / PENDING 204.
+             effective_date and expiration_date promoted from VARCHAR
+             to DATE via CAST (silver stored mixed formats).
+             FK natural keys (program_code, carrier_id, agent_id) preserved
+             for self-documentation; verified zero orphans across all three.
+             premium tightened from FLOAT to DECIMAL(12,2) for exact money math.
+Author:      Venkata Pothireddy
+================================================================
+*/
+
+SELECT TOP 5 * FROM silver_citadel_mga.dbo.silver_policies;
+
+
+
+CREATE TABLE dim.policy (
+    policy_key              INT             NOT NULL,
+    policy_natural_key      VARCHAR(20)     NOT NULL,
+    program_code            VARCHAR(10)     NOT NULL,
+    carrier_id              VARCHAR(20)     NOT NULL,
+    agent_id                VARCHAR(20)     NOT NULL,
+    effective_date          DATE            NOT NULL,
+    expiration_date         DATE            NOT NULL,
+    premium                 DECIMAL(12, 2)  NOT NULL,
+    policy_status           VARCHAR(20)     NOT NULL,
+    insured_name            VARCHAR(200)    NOT NULL,
+    insured_state           CHAR(2)         NOT NULL,
+    created_at              DATETIME2(6)    NOT NULL,
+    updated_at              DATETIME2(6)    NOT NULL
+);
+
+
+SELECT 
+    c.name AS column_name,
+    t.name AS data_type,
+    c.max_length,
+    c.precision,
+    c.scale,
+    c.is_nullable
+FROM sys.columns c
+JOIN sys.types t ON c.user_type_id = t.user_type_id
+WHERE c.object_id = OBJECT_ID('dim.policy')
+ORDER BY c.column_id;
+
+
+
+
+INSERT INTO dim.policy (
+    policy_key,
+    policy_natural_key,
+    program_code,
+    carrier_id,
+    agent_id,
+    effective_date,
+    expiration_date,
+    premium,
+    policy_status,
+    insured_name,
+    insured_state,
+    created_at,
+    updated_at
+)
+SELECT
+    ROW_NUMBER() OVER (ORDER BY policy_id) AS policy_key,
+    policy_id                              AS policy_natural_key,
+    program_code                           AS program_code,
+    carrier_id                             AS carrier_id,
+    agent_id                               AS agent_id,
+    CAST(effective_date AS DATE)           AS effective_date,
+    CAST(expiration_date AS DATE)          AS expiration_date,
+    premium                                AS premium,
+    status                                 AS policy_status,
+    insured_name                           AS insured_name,
+    insured_state                          AS insured_state,
+    SYSDATETIME()                          AS created_at,
+    SYSDATETIME()                          AS updated_at
+FROM silver_citadel_mga.dbo.silver_policies
+WHERE policy_id IS NOT NULL
+  AND program_code IS NOT NULL
+  AND carrier_id IS NOT NULL
+  AND agent_id IS NOT NULL
+  AND effective_date IS NOT NULL
+  AND expiration_date IS NOT NULL
+  AND premium IS NOT NULL
+  AND status IS NOT NULL
+  AND insured_name IS NOT NULL
+  AND insured_state IS NOT NULL;
+
+
+-- Check 1: row count and key integrity
+SELECT 
+    COUNT(*) AS total_rows,
+    MIN(policy_key) AS min_key,
+    MAX(policy_key) AS max_key,
+    COUNT(DISTINCT policy_key) AS distinct_keys
+FROM dim.policy;
+
+
+-- Check 2: status distribution matches silver
+SELECT 
+    policy_status,
+    COUNT(*) AS policy_count
+FROM dim.policy
+GROUP BY policy_status
+ORDER BY policy_count DESC;
+
+
+
+-- Check 3: sample rows with date conversions
+SELECT TOP 5
+    policy_key,
+    policy_natural_key,
+    program_code,
+    carrier_id,
+    agent_id,
+    effective_date,
+    expiration_date,
+    premium,
+    policy_status,
+    insured_state
+FROM dim.policy
+ORDER BY policy_key;
+
+
+
+
+-- Check 4: referential sanity check
+-- Every policy.program_code should exist in dim.program
+SELECT 
+    COUNT(*) AS orphaned_policies
+FROM dim.policy p
+LEFT JOIN dim.program prog ON p.program_code = prog.program_natural_key
+WHERE prog.program_key IS NULL;
+
+
+ALTER TABLE dim.policy 
+ADD CONSTRAINT PK_dim_policy PRIMARY KEY NONCLUSTERED (policy_key) NOT ENFORCED;
