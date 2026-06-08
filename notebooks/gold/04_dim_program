@@ -1,0 +1,108 @@
+/*
+================================================================
+File:        04_dim_program.sql
+Purpose:     Create and populate dim.program in gold_citadel_mga
+Source:      silver_citadel_mga.dbo.silver_programs (10 rows)
+Notes:       commission_modifier and loss_ratio_target stored as
+             DECIMAL(5,4) not FLOAT to avoid binary-precision drift
+             in downstream commission math. Premium ranges promoted
+             from INT to DECIMAL(12,2) to model money correctly.
+Author:      Venkata Pothireddy
+================================================================
+*/
+
+SELECT TOP 5 * FROM silver_citadel_mga.dbo.silver_programs;
+
+
+CREATE TABLE dim.program (
+    program_key             INT             NOT NULL,
+    program_natural_key     VARCHAR(10)     NOT NULL,
+    program_name            VARCHAR(100)    NOT NULL,
+    base_premium_min        DECIMAL(12, 2)  NOT NULL,
+    base_premium_max        DECIMAL(12, 2)  NOT NULL,
+    loss_ratio_target       DECIMAL(5, 4)   NOT NULL,
+    commission_modifier     DECIMAL(5, 4)   NOT NULL,
+    created_at              DATETIME2(6)    NOT NULL,
+    updated_at              DATETIME2(6)    NOT NULL
+);
+
+
+SELECT 
+    c.name AS column_name,
+    t.name AS data_type,
+    c.max_length,
+    c.precision,
+    c.scale,
+    c.is_nullable
+FROM sys.columns c
+JOIN sys.types t ON c.user_type_id = t.user_type_id
+WHERE c.object_id = OBJECT_ID('dim.program')
+ORDER BY c.column_id;
+
+
+INSERT INTO dim.program (
+    program_key,
+    program_natural_key,
+    program_name,
+    base_premium_min,
+    base_premium_max,
+    loss_ratio_target,
+    commission_modifier,
+    created_at,
+    updated_at
+)
+SELECT
+    ROW_NUMBER() OVER (ORDER BY program_code) AS program_key,
+    program_code                              AS program_natural_key,
+    program_name                              AS program_name,
+    base_premium_min                          AS base_premium_min,
+    base_premium_max                          AS base_premium_max,
+    loss_ratio_target                         AS loss_ratio_target,
+    commission_modifier                       AS commission_modifier,
+    SYSDATETIME()                             AS created_at,
+    SYSDATETIME()                             AS updated_at
+FROM silver_citadel_mga.dbo.silver_programs
+WHERE program_code IS NOT NULL
+  AND program_name IS NOT NULL
+  AND base_premium_min IS NOT NULL
+  AND base_premium_max IS NOT NULL
+  AND loss_ratio_target IS NOT NULL
+  AND commission_modifier IS NOT NULL;
+
+
+
+-- Check 1: row count and key integrity
+SELECT 
+    COUNT(*) AS total_rows,
+    MIN(program_key) AS min_key,
+    MAX(program_key) AS max_key,
+    COUNT(DISTINCT program_key) AS distinct_keys
+FROM dim.program;
+
+
+-- Check 2: sample rows showing surrogate + natural keys + business attributes
+SELECT 
+    program_key, 
+    program_natural_key, 
+    program_name, 
+    base_premium_min,
+    base_premium_max,
+    loss_ratio_target,
+    commission_modifier
+FROM dim.program
+ORDER BY program_key;
+
+
+-- Check 3: spot-check the DECIMAL math by showing the precision
+SELECT 
+    program_natural_key,
+    base_premium_min,
+    base_premium_max,
+    loss_ratio_target,
+    commission_modifier
+FROM dim.program
+WHERE program_natural_key = 'HCP';
+
+
+ALTER TABLE dim.program 
+ADD CONSTRAINT PK_dim_program PRIMARY KEY NONCLUSTERED (program_key) NOT ENFORCED;
