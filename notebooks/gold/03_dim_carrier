@@ -1,0 +1,93 @@
+/*
+================================================================
+File:        03_dim_carrier.sql
+Purpose:     Create and populate dim.carrier in gold_citadel_mga
+Source:      silver_citadel_mga.dbo.silver_carriers (20 rows)
+Notes:       Surrogate key via ROW_NUMBER() since Fabric Warehouse
+             does not support IDENTITY columns.
+             DATETIME2 columns require explicit precision in Fabric.
+             VARCHAR types tightened from silver's VARCHAR(8000).
+Author:      Venkata Pothireddy
+================================================================
+*/
+
+
+SELECT TOP 5 * 
+FROM silver_citadel_mga.dbo.silver_carriers;
+
+CREATE TABLE dim.carrier (
+    carrier_key             INT             NOT NULL,
+    carrier_natural_key     VARCHAR(20)     NOT NULL,
+    carrier_name            VARCHAR(200)    NOT NULL,
+    am_best_rating          VARCHAR(5)      NULL,
+    is_admitted             BIT             NOT NULL,
+    created_at              DATETIME2(6)    NOT NULL,
+    updated_at              DATETIME2(6)    NOT NULL
+);
+
+
+
+SELECT 
+    c.name AS column_name,
+    t.name AS data_type,
+    c.max_length,
+    c.is_nullable
+FROM sys.columns c
+JOIN sys.types t ON c.user_type_id = t.user_type_id
+WHERE c.object_id = OBJECT_ID('dim.carrier')
+ORDER BY c.column_id;
+
+
+
+INSERT INTO dim.carrier (
+    carrier_key,
+    carrier_natural_key,
+    carrier_name,
+    am_best_rating,
+    is_admitted,
+    created_at,
+    updated_at
+)
+SELECT
+    ROW_NUMBER() OVER (ORDER BY carrier_id) AS carrier_key,
+    carrier_id                              AS carrier_natural_key,
+    carrier_name                            AS carrier_name,
+    am_best_rating                          AS am_best_rating,
+    admitted                                AS is_admitted,
+    SYSDATETIME()                           AS created_at,
+    SYSDATETIME()                           AS updated_at
+FROM silver_citadel_mga.dbo.silver_carriers
+WHERE carrier_id IS NOT NULL
+  AND carrier_name IS NOT NULL
+  AND admitted IS NOT NULL;
+
+
+  -- Check 1: row count
+SELECT COUNT(*) AS total_rows FROM dim.carrier;
+
+
+-- Check 2: sample rows with surrogate key + natural key both visible
+SELECT TOP 5 
+    carrier_key, 
+    carrier_natural_key, 
+    carrier_name, 
+    am_best_rating, 
+    is_admitted,
+    created_at
+FROM dim.carrier
+ORDER BY carrier_key;
+
+
+-- Check 3: surrogate key integrity - no gaps, no duplicates
+SELECT 
+    MIN(carrier_key) AS min_key,
+    MAX(carrier_key) AS max_key,
+    COUNT(DISTINCT carrier_key) AS distinct_keys,
+    COUNT(*) AS total_rows
+FROM dim.carrier;
+
+-- Adding the PK constraint
+ALTER TABLE dim.carrier 
+ADD CONSTRAINT PK_dim_carrier PRIMARY KEY NONCLUSTERED (carrier_key) NOT ENFORCED;
+
+
