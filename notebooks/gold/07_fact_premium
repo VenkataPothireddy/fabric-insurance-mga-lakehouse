@@ -1,0 +1,140 @@
+/*
+================================================================
+File:        07_fact_premium.sql
+Purpose:     Create and populate fact.premium in gold_citadel_mga
+Source:      silver_citadel_mga.dbo.silver_policies (9,709 rows)
+Grain:       One row per policy
+Notes:       First fact table. Establishes the canonical fact-load
+             pattern: INNER JOINs to all dims translate silver's
+             natural keys into gold surrogate keys. date_key computed
+             from effective_date via arithmetic (matches dim.date keys).
+             policy_natural_key carried as degenerate dimension
+             (Kimball convention for transaction-grain facts).
+             Verified zero orphans across all 5 FK relationships.
+             Total premium: $239M across 9,709 policies, avg $24K.
+Author:      Venkata Pothireddy
+================================================================
+*/
+
+
+CREATE TABLE fact.premium (
+    premium_key             INT             NOT NULL,
+    date_key                INT             NOT NULL,
+    policy_key              INT             NOT NULL,
+    agent_key               INT             NOT NULL,
+    program_key             INT             NOT NULL,
+    carrier_key             INT             NOT NULL,
+    policy_natural_key      VARCHAR(20)     NOT NULL,
+    premium                 DECIMAL(12, 2)  NOT NULL,
+    created_at              DATETIME2(6)    NOT NULL,
+    updated_at              DATETIME2(6)    NOT NULL
+);
+
+
+
+SELECT 
+    c.name AS column_name,
+    t.name AS data_type,
+    c.max_length,
+    c.precision,
+    c.scale,
+    c.is_nullable
+FROM sys.columns c
+JOIN sys.types t ON c.user_type_id = t.user_type_id
+WHERE c.object_id = OBJECT_ID('fact.premium')
+ORDER BY c.column_id;
+
+
+
+INSERT INTO fact.premium (
+    premium_key,
+    date_key,
+    policy_key,
+    agent_key,
+    program_key,
+    carrier_key,
+    policy_natural_key,
+    premium,
+    created_at,
+    updated_at
+)
+SELECT
+    ROW_NUMBER() OVER (ORDER BY s.policy_id)                                          AS premium_key,
+    YEAR(CAST(s.effective_date AS DATE)) * 10000 
+        + MONTH(CAST(s.effective_date AS DATE)) * 100 
+        + DAY(CAST(s.effective_date AS DATE))                                         AS date_key,
+    pol.policy_key                                                                    AS policy_key,
+    a.agent_key                                                                       AS agent_key,
+    prog.program_key                                                                  AS program_key,
+    c.carrier_key                                                                     AS carrier_key,
+    s.policy_id                                                                       AS policy_natural_key,
+    s.premium                                                                         AS premium,
+    SYSDATETIME()                                                                     AS created_at,
+    SYSDATETIME()                                                                     AS updated_at
+FROM silver_citadel_mga.dbo.silver_policies s
+JOIN dim.policy   pol  ON s.policy_id     = pol.policy_natural_key
+JOIN dim.agent    a    ON s.agent_id      = a.agent_natural_key
+JOIN dim.program  prog ON s.program_code  = prog.program_natural_key
+JOIN dim.carrier  c    ON s.carrier_id    = c.carrier_natural_key
+WHERE s.policy_id      IS NOT NULL
+  AND s.effective_date IS NOT NULL
+  AND s.premium        IS NOT NULL
+  AND s.agent_id       IS NOT NULL
+  AND s.program_code   IS NOT NULL
+  AND s.carrier_id     IS NOT NULL;
+
+
+
+SELECT 
+    COUNT(*) AS total_rows,
+    MIN(premium_key) AS min_key,
+    MAX(premium_key) AS max_key,
+    COUNT(DISTINCT premium_key) AS distinct_keys
+FROM fact.premium;
+
+
+SELECT TOP 5
+    premium_key,
+    date_key,
+    policy_key,
+    agent_key,
+    program_key,
+    carrier_key,
+    policy_natural_key,
+    premium,
+    created_at
+FROM fact.premium
+ORDER BY premium_key;
+
+
+
+SELECT 
+    MIN(date_key) AS min_date_key,
+    MAX(date_key) AS max_date_key,
+    COUNT(DISTINCT date_key) AS distinct_dates
+FROM fact.premium;
+
+
+SELECT 
+    COUNT(*) AS policy_count,
+    SUM(premium) AS total_premium,
+    AVG(premium) AS avg_premium,
+    MIN(premium) AS min_premium,
+    MAX(premium) AS max_premium
+FROM fact.premium;
+
+
+
+-- Orphan check: every FK should resolve to a real dim row
+SELECT
+    (SELECT COUNT(*) FROM fact.premium f LEFT JOIN dim.date    d ON f.date_key    = d.date_key    WHERE d.date_key    IS NULL) AS orphan_dates,
+    (SELECT COUNT(*) FROM fact.premium f LEFT JOIN dim.policy  p ON f.policy_key  = p.policy_key  WHERE p.policy_key  IS NULL) AS orphan_policies,
+    (SELECT COUNT(*) FROM fact.premium f LEFT JOIN dim.agent   a ON f.agent_key   = a.agent_key   WHERE a.agent_key   IS NULL) AS orphan_agents,
+    (SELECT COUNT(*) FROM fact.premium f LEFT JOIN dim.program pr ON f.program_key = pr.program_key WHERE pr.program_key IS NULL) AS orphan_programs,
+    (SELECT COUNT(*) FROM fact.premium f LEFT JOIN dim.carrier c ON f.carrier_key = c.carrier_key WHERE c.carrier_key IS NULL) AS orphan_carriers;
+
+
+
+
+ALTER TABLE fact.premium 
+ADD CONSTRAINT PK_fact_premium PRIMARY KEY NONCLUSTERED (premium_key) NOT ENFORCED;
