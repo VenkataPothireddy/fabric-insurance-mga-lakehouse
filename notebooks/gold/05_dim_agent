@@ -1,0 +1,121 @@
+/*
+================================================================
+File:        05_dim_agent.sql
+Purpose:     Create and populate dim.agent in gold_citadel_mga
+Source:      silver_citadel_mga.dbo.silver_agents (200 rows)
+Notes:       Tier distribution: 99 BRONZE / 62 SILVER / 33 GOLD / 6 PLATINUM.
+             Rate is tier-locked exactly (no per-agent variance), so any
+             commission_rate <> agent_tier_rate in fact.commission is
+             unambiguously a VBA bug (Pattern A).
+             hire_date promoted from VARCHAR to DATE via CAST.
+             state_code stored as CHAR(2) since US codes are always 2 chars.
+Author:      Venkata Pothireddy
+================================================================
+*/
+
+
+
+SELECT TOP 5 * FROM silver_citadel_mga.dbo.silver_agents;
+
+CREATE TABLE dim.agent (
+    agent_key               INT             NOT NULL,
+    agent_natural_key       VARCHAR(20)     NOT NULL,
+    first_name              VARCHAR(50)     NOT NULL,
+    last_name               VARCHAR(50)     NOT NULL,
+    agency_name             VARCHAR(200)    NOT NULL,
+    state_code              CHAR(2)         NOT NULL,
+    agent_tier              VARCHAR(20)     NOT NULL,
+    commission_rate         DECIMAL(5, 4)   NOT NULL,
+    hire_date               DATE            NOT NULL,
+    created_at              DATETIME2(6)    NOT NULL,
+    updated_at              DATETIME2(6)    NOT NULL
+);
+
+
+SELECT 
+    c.name AS column_name,
+    t.name AS data_type,
+    c.max_length,
+    c.precision,
+    c.scale,
+    c.is_nullable
+FROM sys.columns c
+JOIN sys.types t ON c.user_type_id = t.user_type_id
+WHERE c.object_id = OBJECT_ID('dim.agent')
+ORDER BY c.column_id;
+
+
+
+INSERT INTO dim.agent (
+    agent_key,
+    agent_natural_key,
+    first_name,
+    last_name,
+    agency_name,
+    state_code,
+    agent_tier,
+    commission_rate,
+    hire_date,
+    created_at,
+    updated_at
+)
+SELECT
+    ROW_NUMBER() OVER (ORDER BY agent_id) AS agent_key,
+    agent_id                              AS agent_natural_key,
+    first_name                            AS first_name,
+    last_name                             AS last_name,
+    agency_name                           AS agency_name,
+    state                                 AS state_code,
+    tier                                  AS agent_tier,
+    commission_rate                       AS commission_rate,
+    CAST(hire_date AS DATE)               AS hire_date,
+    SYSDATETIME()                         AS created_at,
+    SYSDATETIME()                         AS updated_at
+FROM silver_citadel_mga.dbo.silver_agents
+WHERE agent_id IS NOT NULL
+  AND first_name IS NOT NULL
+  AND last_name IS NOT NULL
+  AND agency_name IS NOT NULL
+  AND state IS NOT NULL
+  AND tier IS NOT NULL
+  AND commission_rate IS NOT NULL
+  AND hire_date IS NOT NULL;
+
+
+  -- Check 1: row count and key integrity
+SELECT 
+    COUNT(*) AS total_rows,
+    MIN(agent_key) AS min_key,
+    MAX(agent_key) AS max_key,
+    COUNT(DISTINCT agent_key) AS distinct_keys
+FROM dim.agent;
+
+
+-- Check 2: tier distribution matches silver
+SELECT 
+    agent_tier,
+    COUNT(*) AS agent_count,
+    MIN(commission_rate) AS min_rate,
+    MAX(commission_rate) AS max_rate
+FROM dim.agent
+GROUP BY agent_tier
+ORDER BY MIN(commission_rate);
+
+
+
+-- Check 3: spot-check the hire_date conversion and sample rows
+SELECT TOP 5
+    agent_key,
+    agent_natural_key,
+    first_name,
+    last_name,
+    state_code,
+    agent_tier,
+    commission_rate,
+    hire_date
+FROM dim.agent
+ORDER BY agent_key;
+
+
+ALTER TABLE dim.agent 
+ADD CONSTRAINT PK_dim_agent PRIMARY KEY NONCLUSTERED (agent_key) NOT ENFORCED;
