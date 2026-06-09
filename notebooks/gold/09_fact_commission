@@ -36,8 +36,7 @@ Author:      Venkata Pothireddy
 */
 
 
--- DDL: 26 columns. INT keys, VARCHAR identity/status columns,
--- DECIMAL(5,4) for rates/modifiers, DECIMAL(12,2) for money.
+
 CREATE TABLE fact.commission (
     commission_key              INT             NOT NULL,
     date_key                    INT             NOT NULL,
@@ -68,7 +67,8 @@ CREATE TABLE fact.commission (
 );
 
 
--- Verify the table structure: should return 26 rows, all NOT NULL.
+
+
 SELECT 
     c.name AS column_name,
     t.name AS data_type,
@@ -82,12 +82,8 @@ WHERE c.object_id = OBJECT_ID('fact.commission')
 ORDER BY c.column_id;
 
 
--- Load fact.commission from silver_commission_payouts.
--- Four-table join chain: silver -> dim.policy -> {dim.agent, dim.program, dim.carrier}.
--- agent/program/carrier come through dim.policy because silver_commission_payouts
--- doesn't carry those FKs directly — they're inherited from the parent policy.
--- INNER JOINs intentionally: any payout referencing a missing dim row is dropped
--- and surfaced as a load-time gap rather than silently loading a bad FK.
+
+
 INSERT INTO fact.commission (
     commission_key,
     date_key,
@@ -118,7 +114,6 @@ INSERT INTO fact.commission (
 )
 SELECT
     ROW_NUMBER() OVER (ORDER BY s.payout_id)                              AS commission_key,
-    -- date_key as YYYYMMDD integer, no CAST needed (payout_date already DATE in silver)
     YEAR(s.payout_date) * 10000 
         + MONTH(s.payout_date) * 100 
         + DAY(s.payout_date)                                              AS date_key,
@@ -138,7 +133,6 @@ SELECT
     s.true_program_modifier                                               AS true_program_modifier,
     s.true_volume_bonus                                                   AS true_volume_bonus,
     s.true_status_multiplier                                              AS true_status_multiplier,
-    -- rename silver_ prefix to true_ prefix for consistency with the other corrected values
     s.silver_effective_rate                                               AS true_effective_rate,
     s.silver_commission_amount                                            AS true_commission_amount,
     s.adjustments                                                         AS adjustments,
@@ -171,20 +165,12 @@ WHERE s.payout_id              IS NOT NULL
   AND s.policy_status          IS NOT NULL
   AND s.payout_status          IS NOT NULL
   AND s.calc_method            IS NOT NULL;
--- Expected: 5000 rows. Got: 4977. The 23-row gap is investigated below.
 
 
--- ================================================================
--- INVESTIGATION: why did we get 4977 instead of 5000?
--- The load reported (4977 records affected) — 23 short of the silver
--- row count. That's an INNER JOIN dropping rows, not a NULL filter.
--- The next three queries trace where the gap actually lives.
--- ================================================================
 
 
--- Diagnostic 1: rule out the WHERE clause.
--- Are there silver rows being dropped by the IS NOT NULL filters?
-SELECT COUNT(*) AS nulled_rows
+
+  SELECT COUNT(*) AS nulled_rows
 FROM silver_citadel_mga.dbo.silver_commission_payouts
 WHERE payout_id              IS NULL
    OR policy_id              IS NULL
@@ -205,14 +191,14 @@ WHERE payout_id              IS NULL
    OR policy_status          IS NULL
    OR payout_status          IS NULL
    OR calc_method            IS NULL;
--- Result: 0. So the WHERE clause didn't drop anything — it's a join issue.
 
 
--- Diagnostic 2: find which silver rows failed which join.
--- LEFT JOIN preserves all silver rows, then filter to those where at
--- least one dim FK didn't resolve. The CASE columns label which dim
--- is missing for each row.
-SELECT 
+
+
+
+
+
+   SELECT 
     s.payout_id,
     s.policy_id,
     CASE WHEN pol.policy_key  IS NULL THEN 'MISSING_POLICY'   ELSE NULL END AS policy_issue,
@@ -231,14 +217,11 @@ WHERE pol.policy_key   IS NULL
    OR a.agent_key      IS NULL
    OR prog.program_key IS NULL
    OR c.carrier_key    IS NULL;
--- Result: 23 rows, every one of them MISSING_POLICY. None of the other
--- dims have orphans. So the gap is at the silver_commission_payouts -> 
--- silver_policies link, not in our gold dim loads.
 
 
--- Diagnostic 3: confirm the 23 missing policy_ids don't exist in silver_policies.
--- This rules out "dim.policy didn't load all silver_policies rows."
--- The 23 IDs below are exactly the ones Diagnostic 2 surfaced.
+
+
+
 SELECT COUNT(*) AS missing_in_silver_policies
 FROM (VALUES 
     ('POL-002534'), ('POL-000699'), ('POL-001486'), ('POL-001138'), ('POL-001464'),
@@ -249,15 +232,9 @@ FROM (VALUES
 ) AS missing(policy_id)
 LEFT JOIN silver_citadel_mga.dbo.silver_policies sp ON missing.policy_id = sp.policy_id
 WHERE sp.policy_id IS NULL;
--- Result: 23. Confirmed — these 23 policy_ids don't exist anywhere in
--- silver_policies. The gap is in silver itself, not in our gold load.
--- DECISION: accept the loss, document it, file as a silver DQ issue.
--- Did not regenerate silver or invent placeholder policies.
 
 
--- How many of the 107 reconciliation rows reference one of the 23 orphan payouts?
--- This tells us how many drift rows we'll lose when loading 
--- fact.commission_reconciliation next.
+
 SELECT COUNT(*) AS reconciliation_rows_affected
 FROM silver_citadel_mga.dbo.silver_commission_reconciliation r
 WHERE r.payout_id IN (
@@ -267,11 +244,10 @@ WHERE r.payout_id IN (
     'CMP-0003052', 'CMP-0001816', 'CMP-0003193', 'CMP-0000962', 'CMP-0000802',
     'CMP-0004436', 'CMP-0004443', 'CMP-0000440'
 );
--- Result: 1. We'll lose 1 reconciliation row — fact.commission_reconciliation
--- will hold 106 instead of 107.
 
 
--- Identify the affected reconciliation row so we know which pattern is impacted.
+
+
 SELECT 
     r.payout_id,
     r.policy_id,
@@ -285,18 +261,11 @@ WHERE r.payout_id IN (
     'CMP-0002612', 'CMP-0001629', 'CMP-0001048', 'CMP-0001926', 'CMP-0000244',
     'CMP-0003052', 'CMP-0001816', 'CMP-0003193', 'CMP-0000962', 'CMP-0000802',
     'CMP-0004436', 'CMP-0004443', 'CMP-0000440'
-);
--- Result: CMP-0004443 / POL-006064 / OVERPAYMENT / PATTERN_B / -$82.02.
--- One Pattern B overpayment row dropped. Pattern A (24) and Pattern C (44)
--- are unaffected; Pattern B drops from 39 to 38 in gold.
+); 
 
 
--- ================================================================
--- VERIFICATION of fact.commission load
--- ================================================================
 
 
--- Check 1: row count and key integrity. Expecting 4977 / 1 / 4977 / 4977.
 SELECT 
     COUNT(*) AS total_rows,
     MIN(commission_key) AS min_key,
@@ -305,8 +274,6 @@ SELECT
 FROM fact.commission;
 
 
--- Check 2: eyeball five sample rows. Most rows have VBA == true (no drift)
--- since only 106 of 4977 have a bug, so don't expect drift in this sample.
 SELECT TOP 5
     commission_key,
     date_key,
@@ -324,16 +291,16 @@ FROM fact.commission
 ORDER BY commission_key;
 
 
--- Check 3a: count Pattern A rows in fact directly (wrong tier rate AND money moved).
--- Should match silver's 24.
+
+-- Pattern A signature in fact.commission (those with both wrong rate AND money moved)
 SELECT COUNT(*) AS pattern_a_in_gold
 FROM fact.commission
 WHERE commission_rate <> true_tier_rate
   AND commission_amount <> true_commission_amount;
 
 
--- Check 3b: Pattern B (modifier silently 1.0 AND money moved).
--- Should be 38, down from silver's 39 (we lost CMP-0004443 to the orphan gap).
+
+-- Pattern B signature
 SELECT COUNT(*) AS pattern_b_in_gold
 FROM fact.commission
 WHERE program_modifier = 1.0 
@@ -341,8 +308,9 @@ WHERE program_modifier = 1.0
   AND commission_amount <> true_commission_amount;
 
 
--- Check 3c: Pattern C (volume bonus applied to non-qualifying agent AND money moved).
--- Should match silver's 44.
+
+
+-- Pattern C signature
 SELECT COUNT(*) AS pattern_c_in_gold
 FROM fact.commission
 WHERE volume_bonus > 0 
@@ -350,10 +318,8 @@ WHERE volume_bonus > 0
   AND commission_amount <> true_commission_amount;
 
 
--- Check 4: the headline aggregates the demo hinges on.
--- Net drift is small (~$12K underpaid), but the gross is much larger —
--- Pattern A underpays ~$21K, Pattern C overpays ~$9K. The errors cancel
--- in aggregate while persisting per-agent. That's the demo punchline.
+
+
 SELECT 
     COUNT(*) AS payout_count,
     SUM(commission_amount) AS total_vba_paid,
@@ -362,9 +328,8 @@ SELECT
 FROM fact.commission;
 
 
--- Check 5: referential integrity. Fabric Warehouse doesn't enforce FKs,
--- so verify zero orphans manually across all five dim relationships.
--- Expected: 0 / 0 / 0 / 0 / 0.
+
+
 SELECT
     (SELECT COUNT(*) FROM fact.commission f LEFT JOIN dim.date    d  ON f.date_key    = d.date_key    WHERE d.date_key    IS NULL) AS orphan_dates,
     (SELECT COUNT(*) FROM fact.commission f LEFT JOIN dim.policy  p  ON f.policy_key  = p.policy_key  WHERE p.policy_key  IS NULL) AS orphan_policies,
@@ -373,7 +338,6 @@ SELECT
     (SELECT COUNT(*) FROM fact.commission f LEFT JOIN dim.carrier c  ON f.carrier_key = c.carrier_key WHERE c.carrier_key IS NULL) AS orphan_carriers;
 
 
--- PK constraint: NOT ENFORCED (Fabric requirement). Informational — feeds
--- Power BI semantic model relationship auto-detection and query optimizer.
+
 ALTER TABLE fact.commission 
 ADD CONSTRAINT PK_fact_commission PRIMARY KEY NONCLUSTERED (commission_key) NOT ENFORCED;
