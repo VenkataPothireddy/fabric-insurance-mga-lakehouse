@@ -1,0 +1,125 @@
+-- ============================================================
+-- 10_fact_commission_reconciliation.sql
+-- Gold Layer | fact.commission_reconciliation
+-- ============================================================
+-- Grain: one row per flagged commission payout
+-- Source: dbo.silver_commission_reconciliation
+-- Rows: 106 (silver has 107; CMP-0004443 / POL-006064 dropped
+--        via INNER JOIN — orphan policy in silver, PATTERN_B
+--        OVERPAYMENT ~-$82, documented in 09_fact_commission.sql)
+--
+-- Purpose: reconciliation bridge table — every row here has a
+--          matching row in fact.commission (join on payout_id).
+--          drift_direction and drift_pattern are first-class
+--          columns for direct Power BI slicing without joins.
+--
+-- Pattern distribution:
+--   PATTERN_A UNDERPAYMENT  24  (+$13,728 variance)
+--   PATTERN_B OVERPAYMENT   10  (-$1,579 variance)
+--   PATTERN_B UNDERPAYMENT  28  (+$9,418 variance)
+--   PATTERN_C OVERPAYMENT   44  (-$9,166 variance)
+--   Net: -$12,402 underpaid to agents
+-- ============================================================
+
+
+
+CREATE TABLE fact.commission_reconciliation
+(
+    reconciliation_key      INT             NOT NULL,
+    policy_key              INT             NOT NULL,
+    agent_key               INT             NOT NULL,
+    program_key             INT             NOT NULL,
+    carrier_key             INT             NOT NULL,
+    date_key                INT             NOT NULL,
+    payout_id               VARCHAR(50)     NOT NULL,
+    policy_natural_key      VARCHAR(50)     NOT NULL,
+    premium                 DECIMAL(15,2)   NOT NULL,
+    commission_amount       DECIMAL(15,2)   NOT NULL,
+    true_commission_amount  DECIMAL(15,2)   NOT NULL,
+    variance                DECIMAL(15,2)   NOT NULL,
+    commission_rate         DECIMAL(10,6)   NOT NULL,
+    true_tier_rate          DECIMAL(10,6)   NOT NULL,
+    program_modifier        DECIMAL(10,6)   NOT NULL,
+    true_program_modifier   DECIMAL(10,6)   NOT NULL,
+    volume_bonus            DECIMAL(10,6)   NOT NULL,
+    true_volume_bonus       DECIMAL(10,6)   NOT NULL,
+    drift_direction         VARCHAR(20)     NOT NULL,
+    drift_pattern           VARCHAR(20)     NOT NULL,
+    payout_status           VARCHAR(20)     NOT NULL,
+    loaded_at               DATETIME2(6)    NOT NULL
+);
+
+SELECT 
+    c.name AS column_name,
+    t.name AS data_type
+FROM sys.columns c
+JOIN sys.types t ON c.user_type_id = t.user_type_id
+WHERE c.object_id = OBJECT_ID('fact.commission_reconciliation')
+ORDER BY c.column_id;
+
+
+
+
+INSERT INTO fact.commission_reconciliation
+SELECT
+    ROW_NUMBER() OVER (ORDER BY scr.payout_id)      AS reconciliation_key,
+    dp.policy_key,
+    da.agent_key,
+    dpr.program_key,
+    dc.carrier_key,
+    YEAR(scr.payout_date) * 10000
+        + MONTH(scr.payout_date) * 100
+        + DAY(scr.payout_date)                      AS date_key,
+    scr.payout_id,
+    scr.policy_id                                   AS policy_natural_key,
+    scr.premium,
+    scr.commission_amount,
+    scr.silver_commission_amount                    AS true_commission_amount,
+    scr.variance,
+    scr.commission_rate,
+    scr.true_tier_rate,
+    scr.program_modifier,
+    scr.true_program_modifier,
+    scr.volume_bonus,
+    scr.true_volume_bonus,
+    scr.drift_direction,
+    scr.drift_pattern,
+    scr.payout_status,
+    SYSDATETIME()                                   AS loaded_at
+FROM silver_citadel_mga.dbo.silver_commission_reconciliation scr
+INNER JOIN dim.policy   dp  ON scr.policy_id    = dp.policy_natural_key
+INNER JOIN dim.agent    da  ON scr.agent_id     = da.agent_natural_key
+INNER JOIN dim.program  dpr ON scr.program_code = dpr.program_natural_key
+INNER JOIN dim.carrier  dc  ON dp.carrier_id    = dc.carrier_natural_key
+INNER JOIN dim.date     dd  ON (  YEAR(scr.payout_date) * 10000
+                                + MONTH(scr.payout_date) * 100
+                                + DAY(scr.payout_date)) = dd.date_key;
+
+
+
+
+
+SELECT
+    drift_pattern,
+    drift_direction,
+    COUNT(*) AS rows
+FROM fact.commission_reconciliation
+GROUP BY drift_pattern, drift_direction
+ORDER BY drift_pattern, drift_direction;
+
+
+SELECT
+    drift_pattern,
+    drift_direction,
+    COUNT(*)                        AS incidents,
+    SUM(commission_amount)          AS vba_paid,
+    SUM(true_commission_amount)     AS should_have_paid,
+    SUM(variance)                   AS total_variance
+FROM fact.commission_reconciliation
+GROUP BY drift_pattern, drift_direction
+ORDER BY drift_pattern, drift_direction;
+
+
+ALTER TABLE fact.commission_reconciliation
+ADD CONSTRAINT pk_commission_reconciliation
+PRIMARY KEY NONCLUSTERED (reconciliation_key) NOT ENFORCED;
