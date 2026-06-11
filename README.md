@@ -9,7 +9,7 @@ This started as a prototype for a Data Warehouse Engineer role at a specialty in
   <br/>
   <em>One verified end-to-end run: bronze, silver, gold, success email. 17 minutes.</em>
 </p>
-*One verified end-to-end run: bronze, silver, gold, success email. 17 minutes.*
+
 
 ---
 
@@ -41,8 +41,11 @@ Here is the trap: -$12,402 against $11.4M is roughly 0.1%. No financial review w
 
 That is why the tool ran fifteen years without anyone noticing. Surfacing it is the whole point of the platform.
 
-![Reconciliation drill-down](screenshots/reconciliation_summary.png)
-*Suggested screenshot: warehouse query of fact.commission_reconciliation grouped by drift_pattern and drift_direction.*
+<p align="center">
+  <img src="screenshots/reconciliation_summary.png" alt="Reconciliation summary" width="800"/>
+  <br/>
+  <em>fact.commission_reconciliation grouped by drift_pattern and drift_direction.</em>
+</p>
 
 ---
 
@@ -73,8 +76,11 @@ ORCHESTRATION   4 Fabric Data Pipelines
 
 **Stack:** Microsoft Fabric, PySpark (bronze and silver), T-SQL (gold warehouse), Fabric Data Pipelines, FastAPI for the mock source API, Git for version control.
 
-![Architecture diagram](screenshots/architecture.png)
-*Suggested: a clean draw.io or Excalidraw version of the flow above.*
+<p align="center">
+  <img src="screenshots/architecture.png" alt="Architecture diagram" width="800"/>
+  <br/>
+  <em>Full medallion flow from source to warehouse.</em>
+</p>
 
 ---
 
@@ -139,8 +145,11 @@ Patterns worth pointing at:
 - **Role-playing dates.** `fact.claims` joins `dim.date` twice, once for loss date and once for report date. That one conformed dimension gives you loss-to-report lag analysis (about 30 days average in this data) for free.
 - **Keys inherited through traversal.** Silver claims do not carry agent, program, or carrier IDs. The gold load resolves them through `dim.policy`, the same way the business actually thinks about it: the claim belongs to a policy, the policy belongs to an agent.
 
-![Star schema](screenshots/star_schema.png)
-*Suggested: the model view from the Fabric warehouse, or a quick dbdiagram.io render.*
+<p align="center">
+  <img src="screenshots/star_schema.png" alt="Star schema" width="800"/>
+  <br/>
+  <em>Gold warehouse model view: 5 dims, 4 facts.</em>
+</p>
 
 ---
 
