@@ -51,29 +51,6 @@ That is why the tool ran fifteen years without anyone noticing. Surfacing it is 
 
 ## Architecture
 
-```
-SOURCES
-  6 CSV extracts (policies, claims, agents, carriers, programs, commission payouts)
-  Mock IMS REST API (FastAPI + ngrok): policies, claims, agents endpoints
-        |
-        v
-BRONZE   bronze_citadel_mga (Lakehouse, Delta, PySpark)
-  Raw landing, schema-on-read, ingestion lineage on every row
-        |
-        v
-SILVER   silver_citadel_mga (Lakehouse, Delta, PySpark)
-  DQ checks, strict FK rejection, reject quarantine tables
-  VBA commission logic replicated and corrected, drift pre-classified
-        |
-        v
-GOLD     gold_citadel_mga (Warehouse, T-SQL, Kimball star schema)
-  5 dimensions + 4 facts, surrogate keys, role-playing dates
-        |
-        v
-ORCHESTRATION   4 Fabric Data Pipelines
-  Nightly schedule, per-step failure emails, graceful API degradation
-```
-
 **Stack:** Microsoft Fabric, PySpark (bronze and silver), T-SQL (gold warehouse), Fabric Data Pipelines, FastAPI for the mock source API, Git for version control.
 
 <p align="center">
