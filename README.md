@@ -4,7 +4,11 @@ An end-to-end Microsoft Fabric data platform that rebuilds a 15-year-old Excel V
 
 This started as a prototype for a Data Warehouse Engineer role at a specialty insurance MGA. The design generalizes to any program manager running policy administration on something like Vertafore IMS, with reporting held together by legacy spreadsheet tooling and one person who knows how it all works.
 
-![Master pipeline end-to-end run](screenshots/master_pipeline_run.png)
+<p align="center">
+  <img src="screenshots/Master_pipeline_run.png" alt="Master pipeline end-to-end run" width="800"/>
+  <br/>
+  <em>One verified end-to-end run: bronze, silver, gold, success email. 17 minutes.</em>
+</p>
 *One verified end-to-end run: bronze, silver, gold, success email. 17 minutes.*
 
 ---
@@ -108,8 +112,12 @@ Silver writes a dedicated `silver_commission_reconciliation` table that pre-clas
 
 Silver was right. My queries caught supersets, including five rows where the VBA inputs were wrong but both commission amounts were zero. No money moved, so silver correctly excluded them as non-impactful. The rule that came out of this: **when silver pre-classifies rows for analytics, gold preserves the labels. It does not re-derive them.**
 
-![This is fine](https://i.imgflip.com/4/1wz1x.jpg)
-*The VBA tool, every quarter, for fifteen years.*
+<p align="center">
+  <img src="https://i.imgflip.com/4/1wz1x.jpg" alt="This is fine meme" width="400"/>
+  <br/>
+  <em>The VBA tool, every quarter, for fifteen years.</em>
+</p>
+
 
 ---
 
@@ -151,8 +159,11 @@ The notebooks and SQL do not run themselves. Four Fabric Data Pipelines wire it 
 
 **pipeline_master.** Invokes bronze, then silver, then gold, each gated on the previous one succeeding. Every layer has a failure branch that sends an email with the run ID, a timestamp, and the actual error message pulled from `@{activity('...').error.message}`. A final success email confirms end-to-end freshness. Scheduled nightly at 2 AM, the classic batch window: source systems close out end-of-day around midnight, the pipeline gets a two-hour buffer, and data is fresh before anyone logs in.
 
-![Distracted boyfriend](https://i.imgflip.com/4/1ur9b0.jpg)
-*Me / building pipelines with dependency arrows / "just run the notebooks manually in order"*
+<p align="center">
+  <img src="https://i.imgflip.com/4/1ur9b0.jpg" alt="Distracted boyfriend meme" width="400"/>
+  <br/>
+  <em>Me / building pipelines with dependency arrows / "just run the notebooks manually in order"</em>
+</p>
 
 ---
 
